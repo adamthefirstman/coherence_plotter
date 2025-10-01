@@ -1,6 +1,8 @@
 """
 Quantum Data Plotter Application
 
+author: Adam Kaczmarek
+
 A Tkinter-based GUI application for visualizing quantum computing data from CSV files.
 The application allows users to load quantum data, select specific columns, and generate
 time series plots, histograms, and iteration-based plots with statistical analysis.
