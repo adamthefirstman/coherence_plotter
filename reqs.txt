@@ -2,3 +2,6 @@ pandas
 matplotlib
 scipy
 numpy
+arch
+scikit-learn
+seaborn

@@ -1,0 +1,138 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import entropy
+
+# ----------------------------
+# 1. Load and Prepare Data
+# ----------------------------
+df = pd.read_csv('t2_4.csv')
+data = df['plot_y_data'].values
+T_total = len(data)
+
+# Split: 75% train, 25% test
+split_idx = int(0.75 * T_total)
+historical = data[:split_idx]
+future_true = data[split_idx:]
+n_forecast = len(future_true)
+
+print(f"Total points: {T_total}")
+print(f"Historical (75%): {len(historical)} points")
+print(f"Future to forecast (25%): {n_forecast} points")
+
+# ----------------------------
+# 2. Helper Functions
+# ----------------------------
+
+def shannon_entropy(data, bins=30):
+    hist, _ = np.histogram(data, bins=bins, density=False)
+    probs = hist / np.sum(hist)
+    probs = probs[probs > 0]
+    return -np.sum(probs * np.log(probs))
+
+def fit_gbm_params(series, dt=1.0):
+    log_returns = np.diff(np.log(series + 1e-8))  # avoid log(0)
+    mu = np.mean(log_returns) / dt
+    sigma = np.std(log_returns) / np.sqrt(dt)
+    return mu, sigma
+
+def gbm_path(S0, mu, sigma, n_steps, dt=1.0):
+    dt_sqrt = np.sqrt(dt)
+    dW = np.random.normal(0, dt_sqrt, n_steps)
+    W = np.concatenate([[0], np.cumsum(dW)])
+    t = np.arange(n_steps + 1) * dt
+    X = (mu - 0.5 * sigma**2) * t + sigma * W
+    S = S0 * np.exp(X)
+    return S  # length n_steps + 1
+
+def rmse(y_true, y_pred):
+    return np.sqrt(np.mean((y_true - y_pred)**2))
+
+# ----------------------------
+# 3. Fit GBM from Historical Data
+# ----------------------------
+S0 = historical[-1]
+mu, sigma = fit_gbm_params(historical)
+dt = 1.0
+n_trajectories = 1000
+
+# ----------------------------
+# 4. Generate GBM Forecasts
+# ----------------------------
+gbm_all = []
+for _ in range(n_trajectories):
+    path = gbm_path(S0, mu, sigma, n_forecast, dt)
+    gbm_all.append(path[1:])  # exclude S0
+
+gbm_all = np.array(gbm_all)  # shape: (N, n_forecast)
+gbm_mean = np.mean(gbm_all, axis=0)
+
+# ----------------------------
+# 5. Apply EC-GBM Filtering
+# ----------------------------
+H_ref = shannon_entropy(historical, bins=30)
+entropy_changes = []
+for i in range(n_trajectories):
+    future_vals = gbm_all[i]
+    combined = np.concatenate([historical, future_vals])
+    H_new = shannon_entropy(combined, bins=30)
+    delta_H = H_ref - H_new
+    entropy_changes.append(delta_H)
+
+entropy_changes = np.array(entropy_changes)
+
+# Find max entropy reduction among positive changes
+positive_deltas = entropy_changes[entropy_changes > 0]
+if len(positive_deltas) == 0:
+    raise RuntimeError("No trajectory reduced entropy. Try adjusting bins or increasing n_trajectories.")
+
+max_delta_H = np.max(positive_deltas)
+epsilon = 0.75 * max_delta_H  # as used in paper (Fig. 5)
+
+# Select accepted trajectories
+accepted_mask = entropy_changes >= epsilon
+if not np.any(accepted_mask):
+    accepted_mask = entropy_changes > 0  # fallback
+
+ec_gbm_forecasts = gbm_all[accepted_mask]
+ec_gbm_mean = np.mean(ec_gbm_forecasts, axis=0)
+
+print(f"Accepted {len(ec_gbm_forecasts)} / {n_trajectories} trajectories in EC-GBM.")
+
+# ----------------------------
+# 6. Evaluate Performance
+# ----------------------------
+rmse_gbm = rmse(future_true, gbm_mean)
+rmse_ec_gbm = rmse(future_true, ec_gbm_mean)
+
+print(f"\nRMSE Results:")
+print(f"  GBM       : {rmse_gbm:.3f}")
+print(f"  EC-GBM    : {rmse_ec_gbm:.3f}")
+print(f"  Improvement: {(rmse_gbm - rmse_ec_gbm)/rmse_gbm * 100:.1f}%")
+
+# ----------------------------
+# 7. Plot Results
+# ----------------------------
+plt.figure(figsize=(12, 6))
+
+# Historical
+plt.plot(np.arange(len(historical)), historical, 'o-', color='blue', label='Historical (75%)', markersize=4)
+
+# True future
+plt.plot(np.arange(len(historical), len(data)), future_true, 's-', color='black', label='True Future (25%)', markersize=4)
+
+# Forecasts
+plt.plot(np.arange(len(historical), len(data)), gbm_mean, '--', color='red', linewidth=2,
+         label=f'GBM Forecast (RMSE={rmse_gbm:.2f})')
+
+plt.plot(np.arange(len(historical), len(data)), ec_gbm_mean, '--', color='green', linewidth=2,
+         label=f'EC-GBM Forecast (RMSE={rmse_ec_gbm:.2f})')
+
+plt.axvline(x=split_idx - 0.5, color='gray', linestyle=':', linewidth=1)
+plt.title("GBM vs EC-GBM Forecasting of Qubit Relaxation Times ($T_2$)")
+plt.xlabel("Iteration / Time Step")
+plt.ylabel("$T_2$ Relaxation Time (arb. units)")
+plt.legend()
+plt.grid(True, linestyle=':', alpha=0.6)
+plt.tight_layout()
+plt.show()
