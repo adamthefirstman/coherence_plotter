@@ -1,0 +1,132 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import entropy  # For KL divergence, but we'll define manually
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+# Define parameters
+K = 10000  # Number of biased dice rolls to generate
+faces = np.array([1, 2, 3, 4, 5, 6])  # Dice faces
+probs = np.array([0.1, 0.15, 0.25, 0.25, 0.15, 0.1])  # Biased probabilities, higher for 3 and 4 to mimic normal distribution
+
+# Generate the original K biased dice rolls
+original_rolls = np.random.choice(faces, size=K, p=probs)
+
+# Function to compute Shannon entropy
+def shannon_entropy(data):
+    counts = np.bincount(data, minlength=7)[1:]
+    p = counts / np.sum(counts)
+    p = p[p > 0]
+    return -np.sum(p * np.log(p))
+
+# Compute reference entropy
+H_ref = shannon_entropy(original_rolls)
+
+# Estimate mu and sigma for GBM from the original rolls
+# Compute log returns
+log_returns = np.log(original_rolls[1:] / original_rolls[:-1].astype(float))  # Avoid division issues
+mean_ret = np.mean(log_returns)
+sigma = np.std(log_returns)
+mu = mean_ret + (sigma ** 2) / 2  # Drift parameter for GBM
+
+# Parameters for Monte Carlo simulations using GBM
+num_sims = 1000  # Number of trajectories
+steps = 10  # Number of future steps per trajectory (total forecasted rolls = num_sims * steps)
+dt = 1.0  # Time step
+
+# Run MC simulations to forecast future rolls using GBM and collect trajectories
+trajectories_continuous = []
+trajectories_discrete = []
+deltas = []
+last_roll = float(original_rolls[-1])  # Start from the last original roll
+
+for _ in range(num_sims):
+    traj_cont = []
+    S = last_roll
+    for _ in range(steps):
+        dW = np.random.normal(0, 1)  # Wiener process increment
+        drift = (mu - 0.5 * sigma ** 2) * dt
+        diffusion = sigma * np.sqrt(dt) * dW
+        S *= np.exp(drift + diffusion)
+        traj_cont.append(S)
+    trajectories_continuous.append(traj_cont)
+    
+    # Discretize the trajectory for entropy calculation
+    traj_disc = np.clip(np.round(traj_cont), 1, 6).astype(int)
+    trajectories_discrete.append(traj_disc)
+    
+    # Append to original and compute new entropy
+    combined = np.append(original_rolls, traj_disc)
+    H_new = shannon_entropy(combined)
+    delta_H = H_ref - H_new
+    deltas.append(delta_H)
+
+# For standard GBM, flatten all continuous trajectories
+forecasted = np.concatenate(trajectories_continuous)
+forecasted_rolls = np.clip(np.round(forecasted), 1, 6).astype(int)
+
+# For EC-GBM: Select trajectories based on entropy decrease
+max_delta = max(deltas) if deltas else 0
+frac = 0.75  # Fraction of max entropy decrease, as used in the paper example
+threshold = frac * max_delta
+selected_indices = [i for i, d in enumerate(deltas) if d >= threshold]
+selected_trajectories = [trajectories_discrete[i] for i in selected_indices]
+
+if not selected_trajectories:
+    print("No trajectories selected for EC-GBM. Using all for fallback.")
+    ec_forecasted_rolls = forecasted_rolls
+else:
+    ec_forecasted_rolls = np.concatenate(selected_trajectories)
+
+# Compute probability distributions
+original_counts = np.bincount(original_rolls, minlength=7)[1:7]
+original_prob = original_counts / original_counts.sum()
+
+gbm_counts = np.bincount(forecasted_rolls, minlength=7)[1:7]
+gbm_prob = gbm_counts / gbm_counts.sum()
+
+ec_counts = np.bincount(ec_forecasted_rolls, minlength=7)[1:7]
+ec_prob = ec_counts / ec_counts.sum()
+
+# Function for KL divergence
+def kl_divergence(p, q):
+    p = p + 1e-10  # Avoid log(0)
+    q = q + 1e-10
+    return np.sum(p * np.log(p / q))
+
+kl_gbm = kl_divergence(original_prob, gbm_prob)
+kl_ecgbm = kl_divergence(original_prob, ec_prob)
+
+# Create a DataFrame for comparison
+df = pd.DataFrame({
+    'Face': faces,
+    'Original Prob': original_prob,
+    'GBM Prob': gbm_prob,
+    'EC-GBM Prob': ec_prob
+})
+
+# Print the comparison table and metrics
+print("Probability Distribution Comparison:")
+print(df)
+print("\nSelected Parameters:")
+print(f"mu: {mu:.4f}")
+print(f"sigma: {sigma:.4f}")
+print(f"Reference Entropy (H_ref): {H_ref:.4f}")
+print(f"Max Entropy Decrease: {max_delta:.4f}")
+print(f"Threshold (frac={frac}): {threshold:.4f}")
+print(f"Number of Selected Trajectories: {len(selected_trajectories)}")
+print(f"KL Divergence (Original vs GBM): {kl_gbm:.4f}")
+print(f"KL Divergence (Original vs EC-GBM): {kl_ecgbm:.4f}")
+
+# Plot histograms for visual comparison
+plt.figure(figsize=(10, 6))
+plt.hist(original_rolls, bins=np.arange(0.5, 7.5, 1), density=True, alpha=0.5, label='Original Rolls')
+plt.hist(forecasted_rolls, bins=np.arange(0.5, 7.5, 1), density=True, alpha=0.5, label='GBM Forecasted Rolls')
+plt.hist(ec_forecasted_rolls, bins=np.arange(0.5, 7.5, 1), density=True, alpha=0.5, label='EC-GBM Forecasted Rolls')
+plt.xlabel('Dice Face')
+plt.ylabel('Probability')
+plt.title('Comparison of Original, GBM, and EC-GBM Dice Roll Distributions')
+plt.legend()
+plt.show()
